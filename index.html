@@ -1,0 +1,190 @@
+<!doctype html>
+<html>
+<head>
+
+<style>
+body,div,table,canvas {
+    box-sizing: border-box;
+    margin: 0px;
+    border: 0px;
+    padding: 0px;
+}
+ul {
+  margin: 1ex 0ex;
+}
+</style>
+
+<script src="./jsm/dicomParser.js"></script> 
+<script src="./jsm/FileSaver.min.js"></script> 
+
+<script type="module">
+window.bodyOnload = async () => {
+    progress.log('bodyOnload');
+}
+
+window.allowDrop = (evt) => {
+  evt.preventDefault();
+}
+
+window.drag = (evt) => {
+  evt.dataTransfer.setData("text", evt.target.id);
+}
+
+
+window.drop = (evt) => {
+  console.log("File(s) dropped");
+  evt.preventDefault();
+  window.loadZip(evt);
+}
+</script>
+
+</head>
+<body onload="bodyOnload()" style="width:100%; height:100vh; overflow-y:scroll" ondrop="drop(event)" ondragover="allowDrop(event)">
+<div id="controls" style="position:relative; padding: 1ex; z-index:10">
+Load Medtronic Export file (.zip) by drag/drop to extract Medtronic user-guided tracts, or open file browser: <input type="file" onchange="loadZip(event)"/>
+<div id="console" style="position: relative; width:100%; z-index:10"></div>
+<div id="result" style="position: relative; width:100%; z-index:10"></div>
+
+<script type="module">
+
+// helper routines for adding elements to the Document Object Model
+class DomElem {
+    constructor(elem,attrs) {
+        if (typeof elem === 'string') {
+            elem = document.createElement(elem);
+        }
+        if (attrs) for (let k in attrs) elem[k] = attrs[k];
+        this.elem = elem;
+    }
+
+    append(...elems) {
+        for (let ch of elems) {
+            if (ch instanceof DomElem) ch = ch.elem;
+            this.elem.appendChild(ch);
+        }
+        return this;
+    }
+}
+
+// shorthand for DomElem constructor
+function el(elem,attrs) {
+    return new DomElem(elem,attrs)
+}
+    
+class Progress {
+    constructor() {
+        this.consoleDiv = document.getElementById('console');
+        this.resultDiv = document.getElementById('result');
+        this.indent = 0;
+    }
+    
+    log() {
+        console.log(arguments)
+        this.consoleDiv.innerHTML += '<p>';
+        for (let a of arguments) {
+            this.consoleDiv.innerHTML += a+'&nbsp;';
+        }
+        this.consoleDiv.innerHTML += '</p>';
+    }
+    
+    start(taskName) {
+        console.log('Starting',taskName);
+        this.consoleDiv.innerHTML += '<p>'+taskName+'...';
+    }
+
+    finish(taskName) {
+        console.log('Finish',taskName);
+        this.consoleDiv.innerHTML += ' done</p>';
+    }
+
+    clear() {
+        this.consoleDiv.innerHTML = '';
+    }
+}
+
+window.progress = new Progress();
+
+async function loadZip(evt) {
+    let files = []
+    if (evt.dataTransfer) {
+        if (evt.dataTransfer.items) {
+            [...evt.dataTransfer.items].forEach((item, i) => {
+                if (item.kind === "file") files.push(item.getAsFile());
+            });
+        } else {
+            [...evt.dataTransfer.files].forEach((file, i) => {
+                files.push(item.getAsFile());
+            });
+        }
+    } else {
+        files = evt.target.files;
+    }
+    const file = files[0];
+    
+    progress.start('Unzipping')
+    const { unzip } = await import('./jsm/unzipit.module.js');
+    const fileContents = await unzip(file);
+    progress.finish('Unzipping')
+    
+    progress.start('Locate Dicom Raw Image')
+    let arr = undefined;
+    const names = Object.keys(fileContents.entries);
+    for (const name of names) {
+        if (name.endsWith('/FILE1')) {
+            const buf = await fileContents.entries[name].arrayBuffer();
+            arr = new Uint8Array(buf)
+            break
+        }
+    }
+    if (!arr) throw( progress.log('Unable to find \'FILE1\' in zip-file') );
+    progress.finish('Locate Dicom Raw Image')
+    
+    let stealthArray = undefined;
+    let stealthContents = undefined;
+    const dataSet = dicomParser.parseDicom(arr);
+    progress.start('Parse Dicom Raw Image');
+    for (let tag in dataSet.elements) {
+        const el= dataSet.elements[tag];
+        if (el.vr == 'UN' && el.length>100000) {
+            try {
+                stealthArray = new Uint8Array(arr.buffer,el.dataOffset,el.length-1);
+                stealthContents = await unzip(stealthArray);
+            } catch(err) {
+                // subtract 1 from el.length to avoid comment size error
+                stealthArray = new Uint8Array(arr.buffer,el.dataOffset,el.length-1);
+                stealthContents = await unzip(stealthArray);
+            }
+        }
+    }
+    if (!stealthArray) throw('Unable to find Raw Image in FILE1');
+    progress.finish('Parse Dicom Raw Image');
+    
+    progress.resultDiv.appendChild(
+       el('input',{
+           type:'button',
+           onclick:(ev) => {
+               const stealthBlob = new Blob([stealthArray], {type: 'application/octet-stream'});
+               saveAs(stealthBlob,'stealthExport.zip')
+           },
+           value: 'Save complete, unprocessed zip-file'
+        }).elem
+    );
+    
+    progress.start('Finding Tracts');
+    const stealthNames = Object.keys(stealthContents.entries);
+    const tractFiles = []
+    let indexFile = undefined
+    for (const name of stealthNames) {
+        if (name.toLowerCase().endsWith('.trk')) {
+            tractFiles.push(name)
+        }
+        if (name.endsWith('StealthNavExportIndex.xml')) {
+            indexFile = name;
+        }
+    }
+    progress.log('Found '+tractFiles.length+' tracts and '+(indexFile ? 1 : 0)+' index file.');
+    progress.finish('Finding Tracts');
+}
+window.loadZip = loadZip;
+</script>
+</body></html>
