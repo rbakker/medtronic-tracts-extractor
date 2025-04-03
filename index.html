@@ -19,7 +19,6 @@ ul {
 
 <script type="module">
 window.bodyOnload = async () => {
-    progress.log('bodyOnload');
 }
 
 window.allowDrop = (evt) => {
@@ -40,18 +39,42 @@ window.drop = (evt) => {
 
 </head>
 <body onload="bodyOnload()" style="width:100%; height:100vh; overflow-y:scroll" ondrop="drop(event)" ondragover="allowDrop(event)">
+<h2>Medtronic Tracts Extractor</h2>
 <div id="controls" style="position:relative; padding: 1ex; z-index:10">
-Load Medtronic Export file (.zip) by drag/drop to extract Medtronic user-guided tracts, or open file browser: <input type="file" onchange="loadZip(event)"/>
-<div id="console" style="position: relative; width:100%; z-index:10"></div>
-<div id="result" style="position: relative; width:100%; z-index:10"></div>
+The Medtronic Stealth V8 (neuro)surgical navigation system can be extended with a software module to perform expert-guided tractography on the basis of diffusion MRI images.
+The resulting tracts are displayed in the Stealth Software, but cannot be saved. Only the complete patient record can be exported in DICOM raw image format, using this dialog:
+<div><img src="./img/medtronicexport.png" style="margin:1ex"/></div>
+This tool takes the resulting DICOM image (as a zip-file) and extracts the tractography files from it.
+Drop the zip-file anywhere on this page to get started. Or use the file browser: <input type="file" onchange="loadZip(event)"/>
+<div style="width:100%; border: 1ex solid #aaf; padding: 1ex; margin:1ex 0ex">
+Results appear here.<div id="result" style="position: relative; width:100%"></div>
+</div>
+<div style="width:100%; border: 1ex solid #aaa; padding: 1ex; margin:1ex 0ex">
+Logging happens here.<div id="console" style="position: relative; width:100%"></div>
+</div>
 
 <script type="module">
+function toAlphaNumeric(s) {
+    function to0x(c) {
+        let x = c.charCodeAt(0);
+        if (x>255) x = 168; // inverted questionmark
+        x = x.toString(16);
+        while (x.length<2) x = '0'+x;
+        return '0x'+x;
+    }
+        
+    s = s.replace('0x','0xx');
+    s = s.replace(/[^a-zA-Z0-9]/g,to0x);
+    return s;
+}
 
 // helper routines for adding elements to the Document Object Model
 class DomElem {
     constructor(elem,attrs) {
         if (typeof elem === 'string') {
-            elem = document.createElement(elem);
+            if (elem == '') elem = document.createTextNode(attrs);
+            else if (elem[0] == '#') elem = document.getElementById(elem.slice(1))
+            else elem = document.createElement(elem);
         }
         if (attrs) for (let k in attrs) elem[k] = attrs[k];
         this.elem = elem;
@@ -73,32 +96,49 @@ function el(elem,attrs) {
     
 class Progress {
     constructor() {
-        this.consoleDiv = document.getElementById('console');
-        this.resultDiv = document.getElementById('result');
+        this.consoleDiv = el('#console');
+        this.progressStack = [this.consoleDiv];
+        this.resultDiv = el('#result');
         this.indent = 0;
     }
     
     log() {
-        console.log(arguments)
-        this.consoleDiv.innerHTML += '<p>';
-        for (let a of arguments) {
-            this.consoleDiv.innerHTML += a+'&nbsp;';
+        const elems = []
+        for (let arg of arguments) {
+            if (!(arg instanceof DomElem)) arg = el('div',{innerHTML:arg});
+            elems.push(arg)
         }
-        this.consoleDiv.innerHTML += '</p>';
+        this.progressStack.at(-1).append(...elems);
+    }
+    
+    result(...elems) {
+        this.resultDiv.append(...elems);
     }
     
     start(taskName) {
-        console.log('Starting',taskName);
-        this.consoleDiv.innerHTML += '<p>'+taskName+'...';
+        console.log('Start',taskName);
+        const indentBlock = el('div',{'style':'position: relative; left:4ex'});
+        this.progressStack.at(-1).append(
+            el('','Start '+taskName),
+            el('br'),
+            indentBlock
+        );
+        this.progressStack.push(indentBlock)
     }
 
     finish(taskName) {
+        this.progressStack.pop()
+        this.progressStack.at(-1).append(
+           el('','Finish '+taskName),
+           el('br')
+        );
         console.log('Finish',taskName);
-        this.consoleDiv.innerHTML += ' done</p>';
     }
 
     clear() {
-        this.consoleDiv.innerHTML = '';
+        this.resultDiv.elem.innerHTML = '';
+        this.consoleDiv.elem.innerHTML = '';
+        this.progressStack = [this.consoleDiv];
     }
 }
 
@@ -121,6 +161,7 @@ async function loadZip(evt) {
     }
     const file = files[0];
     
+    progress.clear()
     progress.start('Unzipping')
     const { unzip } = await import('./jsm/unzipit.module.js');
     const fileContents = await unzip(file);
@@ -159,15 +200,17 @@ async function loadZip(evt) {
     if (!stealthArray) throw('Unable to find Raw Image in FILE1');
     progress.finish('Parse Dicom Raw Image');
     
-    progress.resultDiv.appendChild(
-       el('input',{
-           type:'button',
-           onclick:(ev) => {
-               const stealthBlob = new Blob([stealthArray], {type: 'application/octet-stream'});
-               saveAs(stealthBlob,'stealthExport.zip')
-           },
-           value: 'Save complete, unprocessed zip-file'
-        }).elem
+    progress.result(
+        el('p').append(
+            el('input',{
+                type:'button',
+                onclick:(ev) => {
+                    const stealthBlob = new Blob([stealthArray], {type: 'application/octet-stream'});
+                    saveAs(stealthBlob,'stealthExport.zip')
+                },
+                value: 'Save complete, unprocessed zip-file'
+            })
+        )
     );
     
     progress.start('Finding Tracts');
@@ -184,6 +227,59 @@ async function loadZip(evt) {
     }
     progress.log('Found '+tractFiles.length+' tracts and '+(indexFile ? 1 : 0)+' index file.');
     progress.finish('Finding Tracts');
+    
+    progress.start('Processing Tracts');
+    const tractInfoFiles = [];
+    const parser = new DOMParser();
+    let indexXml = await stealthContents.entries[indexFile].text();
+    let xmlDoc = parser.parseFromString(indexXml, "text/xml");
+    let tracts = xmlDoc.evaluate("/patient/diffusionVolumes/diffusionVolume/tracts/dbFile",xmlDoc);
+    let tract = tracts.iterateNext();
+    while (tract) {
+        tractInfoFiles.push(tract.innerHTML);
+        tract = tracts.iterateNext();
+    }                           
+    progress.log('Found '+tractInfoFiles.length+' tract info files.');
+    const name2fname = {};
+    for (let infoFile of tractInfoFiles) {
+        const infoXml = await stealthContents.entries[infoFile].text();
+        const xmlDoc = parser.parseFromString(infoXml, "text/xml");
+        const names = xmlDoc.evaluate("//Tract/mName",xmlDoc);
+        let name = names.iterateNext();
+        const fnames = xmlDoc.evaluate("//Tract/mFilename",xmlDoc);
+        let fname = fnames.iterateNext();
+        if (name && fname && fname.innerHTML.endsWith('.trk')) {
+            console.log('Info',infoFile,'Name',name.innerHTML,'Fname',fname.innerHTML);
+            name2fname[name.innerHTML] = fname.innerHTML;
+        } else {
+            console.log('No tract file name in '+infoFile)
+        }
+    }
+    progress.log('Found '+Object.keys(name2fname).length+' tract names.');
+    for (let name in name2fname) {
+        const fname = name2fname[name];
+        for (let cand of tractFiles) {
+            if (cand.endsWith(fname)) {
+                const trkContents = await stealthContents.entries[cand].arrayBuffer();
+                //const trkName = 'tract-'+toAlphaNumeric(name)+'.trk';
+                const trkName = 'tract-'+name+'.trk';
+                progress.result(
+                    el('input',{
+                        type:'button',
+                        onclick:(ev) => {
+                            const stealthBlob = new Blob([trkContents], {type: 'application/octet-stream'});
+                            saveAs(stealthBlob,trkName);
+                        },
+                        value: 'Save '+trkName
+                    }),
+                    el('br')
+                );
+                break
+            }
+        }
+    }
+                
+    progress.finish('Processing Tracts');
 }
 window.loadZip = loadZip;
 </script>
