@@ -189,18 +189,13 @@ async function loadZip(evt) {
     for (let tag in dataSet.elements) {
         const el= dataSet.elements[tag];
         if (el.vr == 'UN' && el.length>100000) {
-            console.log('ELELELELEL',el)
             try {
-                console.log('A')
                 stealthArray = new Uint8Array(arr.buffer,el.dataOffset,el.length);
                 stealthContents = await unzip(stealthArray);
-                console.log('B')
             } catch(err) {
-                console.log('C')
                 // subtract 1 from el.length to avoid comment size error
                 stealthArray = new Uint8Array(arr.buffer,el.dataOffset,el.length-1);
                 stealthContents = await unzip(stealthArray);
-                console.log('D')
             }
         }
     }
